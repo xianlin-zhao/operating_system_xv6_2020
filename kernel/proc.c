@@ -121,6 +121,19 @@ found:
     return 0;
   }
 
+  p->kernel_pagetable = produce_kpgtbl();
+  if(p->kernel_pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  uint64 va = KSTACK((int) (p - proc));
+  uint64 pa = kvmpa(va);
+  ukvmmap(p->kernel_pagetable, va, pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -139,8 +152,12 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  if(p->kernel_pagetable)
+    proc_freekpagetable(p->kernel_pagetable);
+  p->kernel_pagetable = 0;
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -195,6 +212,20 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmfree(pagetable, sz);
 }
 
+void
+proc_freekpagetable(pagetable_t pagetable)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      uint64 child = PTE2PA(pte);
+      proc_freekpagetable((pagetable_t)child);
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void *)pagetable);
+}
+
 // a user program that calls exec("/init")
 // od -t xC initcode
 uchar initcode[] = {
@@ -220,6 +251,7 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  ukmove(p->pagetable, p->kernel_pagetable, 0, p->sz);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -243,11 +275,22 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    if(sz + n >= PLIC) {
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+      return -1;
+    }
+    if(ukmove(p->pagetable, p->kernel_pagetable, p->sz, sz) < 0) {
       return -1;
     }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    
+    if(PGROUNDUP(sz) < PGROUNDUP(p->sz)){
+      int npages = (PGROUNDUP(p->sz) - PGROUNDUP(sz)) / PGSIZE;
+      uvmunmap(p->kernel_pagetable, PGROUNDUP(sz), npages, 0);
+    }
   }
   p->sz = sz;
   return 0;
@@ -274,6 +317,12 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  if(ukmove(np->pagetable, np->kernel_pagetable, 0, np->sz) < 0){
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
 
   np->parent = p;
 
@@ -473,10 +522,15 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
+  
+        w_satp(MAKE_SATP(p->kernel_pagetable));
+        sfence_vma();
 
+        swtch(&c->context, &p->context);
         // Process is done running for now.
         // It should have changed its p->state before coming back.
+
+        kvminithart();
         c->proc = 0;
 
         found = 1;
