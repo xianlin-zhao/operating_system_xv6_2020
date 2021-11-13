@@ -33,7 +33,6 @@ kinit()
 {
   // initlock(&kmem.lock, "kmem");
   // freerange(end, (void*)PHYSTOP);
-
   for(int i = 0; i < NCPU; i++)
     initlock(&mem[i].lock, "kmem");
   freerange(end, (void*)PHYSTOP);
@@ -69,7 +68,6 @@ kfree(void *pa)
   // r->next = kmem.freelist;
   // kmem.freelist = r;
   // release(&kmem.lock);
-
   push_off();
   int id = cpuid();
   acquire(&mem[id].lock);
