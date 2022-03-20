@@ -5,6 +5,9 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -67,6 +70,52 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15){
+    int i;
+    char *mem;
+    uint64 va;
+    va = r_stval();
+    for(i = 0; i < 16; i++)
+    {
+      if(p->vmas[i].occupy == 1)
+      {
+        if(va >= p->vmas[i].start && va < p->vmas[i].End)
+        {
+          mem = kalloc();
+          if(mem == 0)
+            exit(-1);
+          memset(mem, 0, PGSIZE);
+
+          struct file *f = p->vmas[i].f;
+          ilock(f->ip);
+          uint off = PGROUNDDOWN(va - p->vmas[i].start);
+          int ret = readi(f->ip, 0, (uint64)mem, off, PGSIZE);
+          if(ret == 0)
+          {
+            iunlock(f->ip);
+            kfree(mem);
+            exit(-1);
+          }
+          iunlock(f->ip);
+
+          int perm = 0;
+          perm |= PTE_U;
+          if(p->vmas[i].prot & 0x1)
+            perm |= PTE_R;
+          if(p->vmas[i].prot & 0x2)
+            perm |= PTE_W;
+          ret = mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, perm);
+          if(ret < 0)
+          {
+            kfree(mem);
+            exit(-1);
+          }
+          break;
+        }
+      }
+    }
+    if(i == 16)
+      exit(-1);
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

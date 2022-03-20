@@ -296,6 +296,15 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  for(i = 0; i < 16; i++)
+  {
+    if(p->vmas[i].occupy == 1)
+    {
+      memmove(&(np->vmas[i]), &(p->vmas[i]), sizeof(p->vmas[i]));
+      filedup(p->vmas[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -350,6 +359,18 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  for(int i = 0; i < 16; i++)
+  {
+    if(p->vmas[i].occupy == 1)
+    {
+      p->vmas[i].occupy = 0;
+      if(p->vmas[i].flags & 0x01)
+        filewrite(p->vmas[i].f, p->vmas[i].start, p->vmas[i].length);
+      uvmunmap(p->pagetable, p->vmas[i].start, p->vmas[i].length / PGSIZE, 1);
+      fileclose(p->vmas[i].f);
     }
   }
 

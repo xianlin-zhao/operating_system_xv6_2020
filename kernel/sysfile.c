@@ -484,3 +484,79 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  int length, prot, flags, fd;
+  struct file *f;
+  if(argint(1, &length) < 0 || argint(2, &prot) < 0)
+    return -1;
+  if(argint(3, &flags) < 0 || argint(4, &fd) < 0)
+    return -1;
+  struct proc *p = myproc();
+  if(fd < 0 || fd >= NOFILE || (f=p->ofile[fd]) == 0)
+    return -1;
+  if((prot & 0x2) && f->writable == 0 && (flags & 0x01))
+    return -1;
+  acquire(&p->lock);
+  for(int i = 0; i < 16; i++)
+  {
+    if(p->vmas[i].occupy == 0)
+    {
+      p->vmas[i].occupy = 1;
+      p->vmas[i].start = p->sz;
+      p->vmas[i].End = p->sz + length;
+      p->vmas[i].length = length;
+      p->vmas[i].prot = prot;
+      p->vmas[i].flags = flags;
+      p->vmas[i].fd = fd;
+      p->vmas[i].f = f;
+      p->sz += length;
+      release(&p->lock);
+      filedup(f);
+      return p->sz - length;
+    }
+  }
+  release(&p->lock);
+  return -1;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+  struct proc *p = myproc();
+  for(int i = 0; i < 16; i++)
+  {
+    if(p->vmas[i].occupy == 1)
+    {
+      if(addr >= p->vmas[i].start && addr < p->vmas[i].End)
+      {
+        if(addr == p->vmas[i].start)
+        {
+          p->vmas[i].start += length;
+          p->vmas[i].length = p->vmas[i].End - p->vmas[i].start;
+        }
+        else
+        {
+          p->vmas[i].length -= length;
+          p->vmas[i].start = p->vmas[i].End - p->vmas[i].length;
+        }
+        if(p->vmas[i].flags & 0x01)
+          filewrite(p->vmas[i].f, addr, length);
+        uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+        if(p->vmas[i].length == 0)
+        {
+          fileclose(p->vmas[i].f);
+          p->vmas[i].occupy = 0;
+        }
+        return 0;
+      }
+    }
+  }
+  return -1;
+}
